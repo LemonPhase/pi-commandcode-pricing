@@ -5,13 +5,13 @@
 ## Install
 
 ```bash
-pi install git:github.com/jack-zhang/pi-commandcode-pricing
+pi install git:github.com/LemonPhase/pi-commandcode-pricing
 ```
 
 Or try without installing:
 
 ```bash
-pi -e git:github.com/jack-zhang/pi-commandcode-pricing
+pi -e git:github.com/LemonPhase/pi-commandcode-pricing
 ```
 
 ## Commands
