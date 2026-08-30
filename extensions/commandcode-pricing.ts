@@ -5,7 +5,7 @@
 // plan's own tables. Max's two tiers differ only in credit amounts, so both tiers share a row.
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const PLAN_URLS = {
 	go: "https://commandcode.ai/docs/plans/go",
@@ -53,6 +53,15 @@ interface FlightModel {
 	intelligenceIndex: number | null;
 	minPlanName: string | null;
 	deal: { free?: boolean } | null;
+}
+
+// Printable-text input: on modern terminals (kitty/ghostty/WezTerm) letters arrive as CSI-u
+// sequences like \x1b[113u, not raw chars — decode like pi's own editor does, with a raw-char
+// fallback for legacy terminals. Returns null for non-printable input.
+function printable(data: string): string | null {
+	const decoded = decodeKittyPrintable(data);
+	if (decoded) return decoded;
+	return data.length === 1 && data.charCodeAt(0) >= 32 ? data : null;
 }
 
 function stripTags(html: string): string {
@@ -108,22 +117,30 @@ function flightArrayAfter(flight: string, marker: string): string | null {
 	return null;
 }
 
-function parseFlight(html: string): { byName: Map<string, FlightModel>; models: FlightModel[]; goatIds: Set<string> } {
+function parseFlight(html: string, onError?: (msg: string) => void): { byName: Map<string, FlightModel>; models: FlightModel[]; goatIds: Set<string> } {
 	const out = { byName: new Map<string, FlightModel>(), models: [] as FlightModel[], goatIds: new Set<string>() };
 	try {
 		const chunks = [...html.matchAll(/self\.__next_f\.push\(\[1,(".*?")\]\)/gs)].map((m) => m[1]);
 		const flight = chunks.map((c) => JSON.parse(c) as string).join("");
 		const modelsText = flightArrayAfter(flight, '"models":[');
 		if (modelsText) {
-			out.models = JSON.parse(modelsText.replace(/"\$undefined"/g, "null")) as FlightModel[];
-			for (const m of out.models) out.byName.set(m.name.toLowerCase(), m);
+			const parsed = JSON.parse(modelsText.replace(/"\$undefined"/g, "null")) as FlightModel[];
+			// Shape check: a false marker match (the byte sequence can appear in embedded page
+			// text) would parse to garbage — treat as absent rather than poisoning every row
+			if (Array.isArray(parsed) && parsed.every((m) => typeof m?.name === "string" && typeof m?.id === "string")) {
+				out.models = parsed;
+				for (const m of parsed) out.byName.set(m.name.toLowerCase(), m);
+			} else {
+				onError?.("flight models payload failed shape check — intel columns show “—”");
+			}
 		}
 		const idsText = flightArrayAfter(flight, '"modelIds":[');
 		if (idsText) {
-			for (const id of JSON.parse(idsText) as string[]) out.goatIds.add(id);
+			const ids = JSON.parse(idsText) as unknown;
+			if (Array.isArray(ids)) for (const id of ids) if (typeof id === "string") out.goatIds.add(id);
 		}
-	} catch {
-		// Flight data unavailable — intel column shows "—", value sort degrades gracefully
+	} catch (err) {
+		onError?.(`flight data unavailable (${err instanceof Error ? err.message : String(err)}) — intel columns show “—”`);
 	}
 	return out;
 }
@@ -144,7 +161,9 @@ function parseCreditRows(html: string): CreditRowRaw[] {
 	const seen = new Set<string>();
 	for (const table of html.match(/<table[\s\S]*?<\/table>/g) ?? []) {
 		const headCells = (table.match(/<th[\s\S]*?<\/th>/g) ?? []).map(stripTags);
-		if (headCells.some((h) => h.includes("Price/mo"))) continue;
+		// Real credit tables start with a Model column; the plans-overview table starts with
+		// "Plan" and would otherwise parse as models (its Credits/mo column mentions credits)
+		if (!headCells[0]?.includes("Model")) continue;
 		const creditIdx: number[] = [];
 		headCells.forEach((h, i) => {
 			if (h.toLowerCase().includes("credits") && i > 0) creditIdx.push(i);
@@ -154,6 +173,8 @@ function parseCreditRows(html: string): CreditRowRaw[] {
 			const cells = (rowEl.match(/<td[\s\S]*?<\/td>/g) ?? []).map(stripTags);
 			if (cells.length < headCells.length - 1 || parsePrice(cells[1] ?? "") === null) continue;
 			const name = modelName(cells[0]);
+			// First table wins when the same model appears in multiple credit tables
+			// (e.g. boosted vs 2× segments); current plan pages have disjoint model sets.
 			if (seen.has(name.toLowerCase())) continue;
 			seen.add(name.toLowerCase());
 			rows.push({
@@ -195,12 +216,12 @@ async function fetchPage(url: string): Promise<string> {
 	return res.text();
 }
 
-async function buildPlanTable(plan: Plan): Promise<PlanTable> {
+async function buildPlanTable(plan: Plan, onError?: (msg: string) => void): Promise<PlanTable> {
 	// Intel always comes from the goat page's flight JSON (whole catalogue lives there);
 	// the goat page doubles as the plan page in that case.
 	const goatP = fetchPage(PLAN_URLS.goat);
 	const pageP = plan === "go" ? goatP : fetchPage(PLAN_URLS[plan]);
-	const [pageHtml, intel] = await Promise.all([pageP, goatP.then(parseFlight)]);
+	const [pageHtml, intel] = await Promise.all([pageP, goatP.then((h) => parseFlight(h, onError))]);
 	return plan === "go" ? buildGoTable(intel) : buildModelTable(plan, pageHtml, intel);
 }
 
@@ -369,32 +390,32 @@ class PricingOverlay implements Component {
 				this.scroll--;
 			} else if (matchesKey(data, "down")) {
 				this.scroll++;
-			} else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-				this.query += data;
 			} else {
-				return;
+				const ch = printable(data); // CSI-u aware — kitty terminals send \x1b[113u for "q"
+				if (ch) this.query += ch;
+				else return;
 			}
 			this.clampScroll();
 			this.tui.requestRender();
 			return;
 		}
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "return") || data === "q") {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "return") || printable(data) === "q") {
 			this.done();
-		} else if (data === "/") {
+		} else if (printable(data) === "/") {
 			this.searching = true;
 		} else if (matchesKey(data, "tab")) {
 			this.sortIdx = (this.sortIdx + 1) % SORT_MODES.length;
-		} else if (matchesKey(data, "up") || data === "k") {
+		} else if (matchesKey(data, "up") || printable(data) === "k") {
 			this.scroll--;
-		} else if (matchesKey(data, "down") || data === "j") {
+		} else if (matchesKey(data, "down") || printable(data) === "j") {
 			this.scroll++;
-		} else if (matchesKey(data, "pageUp") || data === "u") {
+		} else if (matchesKey(data, "pageUp") || printable(data) === "u") {
 			this.scroll -= page;
-		} else if (matchesKey(data, "pageDown") || data === "d") {
+		} else if (matchesKey(data, "pageDown") || printable(data) === "d") {
 			this.scroll += page;
-		} else if (matchesKey(data, "home") || data === "g") {
+		} else if (matchesKey(data, "home") || printable(data) === "g") {
 			this.scroll = 0;
-		} else if (matchesKey(data, "end") || data === "G") {
+		} else if (matchesKey(data, "end") || printable(data) === "G") {
 			this.scroll = Number.POSITIVE_INFINITY;
 		} else {
 			return;
@@ -478,14 +499,15 @@ async function openPricing(plan: Plan, ctx: ExtensionCommandContext): Promise<vo
 	ctx.ui.setStatus("cc-pricing", `fetching ${plan} pricing…`);
 	let table: PlanTable;
 	try {
-		table = await buildPlanTable(plan);
+		table = await buildPlanTable(plan, (msg) => ctx.ui.notify(`${plan} pricing: ${msg}`, "warning"));
 	} catch (err) {
 		ctx.ui.notify(`${plan} pricing: ${err instanceof Error ? err.message : String(err)}`, "error");
 		return;
 	} finally {
 		ctx.ui.setStatus("cc-pricing", undefined);
 	}
-	if (ctx.mode !== "tui") {
+	if (ctx.mode === "print") {
+		// print mode owns stdout; json/rpc modes stream a protocol there — notify instead
 		for (const m of table.rows)
 			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
 		return;

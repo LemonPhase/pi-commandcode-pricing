@@ -28,7 +28,7 @@ const consts = Object.entries(constPatterns).map(([k, re]) => {
 	if (!m) throw new Error(`const extraction failed: ${k}`);
 	return m;
 }).join("\n");
-const body = ["stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
+const body = ["printable", "stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
 
 // pi-tui stubs, injected as parameters
 const ESC = "\x1b";
@@ -40,11 +40,17 @@ const visibleWidth = (s) => s.replace(/\x1b\[[0-9;]*[mM]/g, "").replace(/\x1b\[7
 const truncateToWidth = (s, n) => (visibleWidth(s) > n ? s.slice(0, n - 1) + "…" : s);
 const GOAT_URL = "https://commandcode.ai/docs/plans/goat";
 const matchesKey = (data, key) => data === KEYS[key];
+const decodeKittyPrintable = (data) => {
+	const m = /^\x1b\[(\d+)u$/.exec(data);
+	if (!m) return undefined;
+	const cp = Number.parseInt(m[1], 10);
+	return Number.isFinite(cp) && cp >= 32 ? String.fromCodePoint(cp) : undefined;
+};
 
 const mod = new Function(
-	"visibleWidth", "truncateToWidth", "GOAT_URL", "matchesKey",
+	"visibleWidth", "truncateToWidth", "GOAT_URL", "matchesKey", "decodeKittyPrintable",
 	`${consts}\n${body}\n${cls}\nreturn { parseFlight, parseCreditRows, parseRequestMap, buildGoTable, buildModelTable, sortRows, layoutWidths, creditText, PricingOverlay, PLAN_URLS };`,
-)(visibleWidth, truncateToWidth, GOAT_URL, matchesKey);
+)(visibleWidth, truncateToWidth, GOAT_URL, matchesKey, decodeKittyPrintable);
 
 let failures = 0;
 const check = (cond, msg) => {
@@ -64,7 +70,8 @@ const interactionCheck = (table, natural) => {
 	const ov = new mod.PricingOverlay(table, "test", { terminal: { rows: 40 }, requestRender() {} }, { fg: (_c, s) => s }, () => {});
 	const strip = (s) => s.replace(/\x1b\[[0-9;]*[mM]/g, "");
 	ov.handleInput("/");
-	for (const c of (table.rows[0]?.model.split(" ")[0] || "zz").toLowerCase().slice(0, 3)) ov.handleInput(c);
+	const term = (table.rows[0]?.model.split(" ")[0] || "zz").toLowerCase().slice(0, 3);
+	for (const c of term) ov.handleInput(`\x1b[${c.codePointAt(0)}u`); // kitty CSI-u form
 	let out = ov.render(natural).map(strip);
 	check(out.some((l) => l.includes("/ ") && !l.includes("/ to search")), "search prompt renders");
 	check(!out.some((l) => l.includes("no match")), "non-empty query matches");
