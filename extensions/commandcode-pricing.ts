@@ -1,7 +1,9 @@
 // Command Code plan pricing for pi — /go-pricing /goat-pricing /pro-pricing /max-pricing
 // Data is scraped live from each plan's page on commandcode.ai (no public pricing API exists).
-// Intelligence scores always come from the GOAT page's embedded flight JSON, which covers the
-// whole 62-model catalogue; every other column comes from the plan's own tables.
+// Intelligence scores and the Go-plan model list come from the GOAT page's embedded flight
+// JSON, which covers the whole 62-model catalogue; prices/credits/limits come from each
+// plan's own tables. Plans with multiple tiers (max) or an overview (go) expose several
+// views; h/l cycles between them inside the popup.
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -34,13 +36,18 @@ interface Row {
 	req5h: string;
 	reqWeek: string;
 	reqMonth: string;
-	credits: { label: string; value: string }[]; // one per tier; max has two
+	credits: { label: string; value: string }[]; // one per tier (single-tier views carry one)
 	blended: number; // 0.75·in + 0.25·out from this row's own prices, for the value sort
 }
 
-interface PlanTable {
+interface PlanView {
+	label: string;
 	headers: string[];
 	rows: Row[];
+}
+
+interface PlanTable {
+	views: PlanView[];
 	url: string;
 }
 
@@ -51,6 +58,7 @@ interface FlightModel {
 	outputCost: number | null;
 	cacheReadCost: number | null;
 	intelligenceIndex: number | null;
+	minPlanName: string | null;
 	deal: { free?: boolean } | null;
 }
 
@@ -75,6 +83,10 @@ function modelName(s: string): string {
 function parsePrice(s: string): number | null {
 	const m = /\$([0-9.]+)/.exec(s);
 	return m ? Number.parseFloat(m[1]) : null;
+}
+
+function formatPrice(v: number | null): string {
+	return v == null ? "—" : `$${v.toFixed(2)}`;
 }
 
 // Extract the text of a JSON array that follows `marker` (which includes its opening
@@ -198,13 +210,14 @@ async function buildPlanTable(plan: Plan): Promise<PlanTable> {
 		fetchPage(url),
 		plan === "go" ? Promise.resolve(null) : fetchPage(PLAN_URLS.goat).then(parseFlight),
 	]);
-	if (plan === "go") return buildGoTable(html);
-	return buildModelTable(plan, html, intel ?? { byName: new Map(), models: [], goatIds: new Set() });
+	const flight = intel ?? { byName: new Map<string, FlightModel>(), models: [] as FlightModel[], goatIds: new Set<string>() };
+	if (plan === "go") return buildGoTable(html, flight);
+	return buildModelTable(plan, html, flight);
 }
 
-// go is a plans-overview page — no model tables. Map its 5-column overview onto Row:
-// Plan | Price/mo | Credits/mo | Included LLM Usage | Models
-function buildGoTable(html: string): PlanTable {
+// go is a plans-overview page — no model tables on it. Two views: the overview table, and
+// the Go-eligible models (minPlanName "Go" in the goat page's catalogue flight data).
+function buildGoTable(html: string, intel: { byName: Map<string, FlightModel>; models: FlightModel[] }): PlanTable {
 	const rows: Row[] = [];
 	for (const table of html.match(/<table[\s\S]*?<\/table>/g) ?? []) {
 		const header = table.match(/<thead>[\s\S]*?<\/thead>/)?.[0] ?? "";
@@ -227,7 +240,31 @@ function buildGoTable(html: string): PlanTable {
 		}
 	}
 	if (rows.length === 0) throw new Error("No plan table found — page format may have changed");
-	return { headers: GO_HEADERS, rows, url: PLAN_URLS.go };
+
+	// Models view: everything the catalogue gates at Go or above. The go page publishes no
+	// per-model credit allowances or request windows, so those columns stay "—".
+	const modelRows: Row[] = intel.models
+		.filter((m) => m.minPlanName === "Go")
+		.map((m) => ({
+			model: m.name,
+			input: formatPrice(m.inputCost),
+			output: formatPrice(m.outputCost),
+			cacheRead: formatPrice(m.cacheReadCost),
+			intel: m.intelligenceIndex != null ? m.intelligenceIndex.toFixed(1) : "—",
+			req5h: "—",
+			reqWeek: "—",
+			reqMonth: "—",
+			credits: [{ label: "Credits", value: "—" }],
+			blended: blendedCost(formatPrice(m.inputCost), formatPrice(m.outputCost)),
+		}));
+
+	return {
+		views: [
+			{ label: "Overview", headers: GO_HEADERS, rows },
+			{ label: `Models (${modelRows.length})`, headers: STANDARD_HEADERS, rows: modelRows },
+		],
+		url: PLAN_URLS.go,
+	};
 }
 
 function buildModelTable(
@@ -236,49 +273,80 @@ function buildModelTable(
 	intel: { byName: Map<string, FlightModel>; models: FlightModel[]; goatIds: Set<string> },
 ): PlanTable {
 	const req = parseRequestMap(html);
-	const rows: Row[] = [];
+	interface Base extends Omit<Row, "credits"> {}
+	const bases: { base: Base; credits: { label: string; value: string }[] }[] = [];
 	for (const cr of parseCreditRows(html)) {
 		const fm = intel.byName.get(cr.name.toLowerCase());
 		const rq = req.get(cr.name.toLowerCase());
-		rows.push({
-			model: cr.name,
-			input: cr.input,
-			output: cr.output,
-			cacheRead: cr.cacheRead,
-			intel: fm?.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
-			req5h: rq?.[0] ?? "—",
-			reqWeek: rq?.[1] ?? "—",
-			reqMonth: rq?.[2] ?? "—",
+		bases.push({
+			base: {
+				model: cr.name,
+				input: cr.input,
+				output: cr.output,
+				cacheRead: cr.cacheRead,
+				intel: fm?.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
+				req5h: rq?.[0] ?? "—",
+				reqWeek: rq?.[1] ?? "—",
+				reqMonth: rq?.[2] ?? "—",
+				blended: blendedCost(cr.input, cr.output),
+			},
 			credits: cr.creditValues,
-			blended: blendedCost(cr.input, cr.output),
 		});
 	}
 
 	// Goat only: free models on the plan (planScope-gated) have no credit-table row — add
 	// them from flight data. Max's credit table already includes its free rows.
 	if (plan === "goat") {
-		const usedIds = new Set(rows.map((r) => intel.byName.get(r.model.toLowerCase())?.id ?? ""));
+		const usedIds = new Set(bases.map((b) => intel.byName.get(b.base.model.toLowerCase())?.id ?? ""));
 		for (const fm of intel.models) {
 			if (!fm.deal?.free || !intel.goatIds.has(fm.id) || usedIds.has(fm.id)) continue;
 			usedIds.add(fm.id);
-			const fmt = (v: number | null) => (v == null ? "—" : `$${v.toFixed(2)}`);
-			rows.push({
-				model: `${fm.name} (Free)`,
-				input: fmt(fm.inputCost),
-				output: fmt(fm.outputCost),
-				cacheRead: fmt(fm.cacheReadCost),
-				intel: fm.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
-				req5h: "—",
-				reqWeek: "—",
-				reqMonth: "—",
+			bases.push({
+				base: {
+					model: `${fm.name} (Free)`,
+					input: formatPrice(fm.inputCost),
+					output: formatPrice(fm.outputCost),
+					cacheRead: formatPrice(fm.cacheReadCost),
+					intel: fm.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
+					req5h: "—",
+					reqWeek: "—",
+					reqMonth: "—",
+					blended: 0,
+				},
 				credits: [{ label: "Credits", value: "Free" }],
-				blended: 0,
 			});
 		}
 	}
 
-	if (rows.length === 0) throw new Error("No pricing tables found — page format may have changed");
-	return { headers: STANDARD_HEADERS, rows, url: PLAN_URLS[plan] };
+	if (bases.length === 0) throw new Error("No pricing tables found — page format may have changed");
+
+	// Multi-tier tables (max) become one view per credit column, in table order; single-tier
+	// plans get one view. Tier count is the max entries per row — goat's merged free rows use a
+	// different label ("Credits" vs "Monthly credits") but are still single-entry.
+	const tierCount = Math.max(...bases.map((b) => b.credits.length));
+	const labels: string[] = [];
+	if (tierCount > 1) {
+		for (const b of bases) {
+			if (b.credits.length !== tierCount) continue;
+			for (const c of b.credits) {
+				if (!labels.includes(c.label)) labels.push(c.label);
+			}
+		}
+	}
+	const views: PlanView[] =
+		tierCount <= 1
+			? [{ label: "", headers: STANDARD_HEADERS, rows: bases.map((b) => ({ ...b.base, credits: b.credits })) }]
+			: labels.map((label) => ({
+					label,
+					headers: STANDARD_HEADERS,
+					rows: bases.map((b) => ({
+						...b.base,
+						credits: b.credits.filter((c) => c.label === label).length > 0
+							? b.credits.filter((c) => c.label === label)
+							: [{ label, value: "—" }],
+					})),
+				}));
+	return { views, url: PLAN_URLS[plan] };
 }
 
 const SORT_MODES: { key: "credits" | "intel" | "value"; label: string }[] = [
@@ -327,10 +395,12 @@ function creditText(r: Row): string {
 }
 
 class PricingOverlay implements Component {
-	private table: PlanTable;
+	private views: PlanView[];
 	private planLabel: string;
+	private url: string;
 	private tui: TUI;
 	private theme: Theme;
+	private viewIdx = 0;
 	private scroll = 0;
 	private sortIdx = 0;
 	private query = "";
@@ -338,11 +408,16 @@ class PricingOverlay implements Component {
 	private done: () => void;
 
 	constructor(table: PlanTable, planLabel: string, tui: TUI, theme: Theme, done: () => void) {
-		this.table = table;
+		this.views = table.views;
 		this.planLabel = planLabel;
+		this.url = table.url;
 		this.tui = tui;
 		this.theme = theme;
 		this.done = done;
+	}
+
+	private get view(): PlanView {
+		return this.views[this.viewIdx];
 	}
 
 	handleInput(data: string): void {
@@ -354,7 +429,11 @@ class PricingOverlay implements Component {
 			} else if (matchesKey(data, "return")) {
 				this.searching = false; // keep the filter, leave input mode
 			} else if (matchesKey(data, "backspace")) {
-				this.query = this.query.slice(0, -1);
+				if (this.query === "") {
+					this.searching = false; // vim-style: backspace on empty search cancels it
+				} else {
+					this.query = this.query.slice(0, -1);
+				}
 			} else if (matchesKey(data, "tab")) {
 				this.sortIdx = (this.sortIdx + 1) % SORT_MODES.length;
 			} else if (matchesKey(data, "up")) {
@@ -376,6 +455,12 @@ class PricingOverlay implements Component {
 			this.searching = true;
 		} else if (matchesKey(data, "tab")) {
 			this.sortIdx = (this.sortIdx + 1) % SORT_MODES.length;
+		} else if (this.views.length > 1 && (data === "h" || matchesKey(data, "left"))) {
+			this.viewIdx = (this.viewIdx - 1 + this.views.length) % this.views.length;
+			this.scroll = 0;
+		} else if (this.views.length > 1 && (data === "l" || matchesKey(data, "right"))) {
+			this.viewIdx = (this.viewIdx + 1) % this.views.length;
+			this.scroll = 0;
 		} else if (matchesKey(data, "up") || data === "k") {
 			this.scroll--;
 		} else if (matchesKey(data, "down") || data === "j") {
@@ -401,7 +486,7 @@ class PricingOverlay implements Component {
 
 	private filtered(): Row[] {
 		const q = this.query.trim().toLowerCase();
-		return q ? this.table.rows.filter((r) => r.model.toLowerCase().includes(q)) : this.table.rows;
+		return q ? this.view.rows.filter((r) => r.model.toLowerCase().includes(q)) : this.view.rows;
 	}
 
 	private visibleRows(): number {
@@ -422,7 +507,7 @@ class PricingOverlay implements Component {
 		this.clampScroll();
 		const vis = sorted.slice(this.scroll, this.scroll + rows);
 
-		const { widths, nameW } = layoutWidths(this.table.headers, sorted, innerW);
+		const { widths, nameW } = layoutWidths(this.view.headers, sorted, innerW);
 		const format = (model: string, rest: string[], colorLast?: (s: string) => string) => {
 			const parts = rest.map((c, i) => c.padStart(widths[i]));
 			const last = colorLast && parts.length > 0 ? colorLast(parts[parts.length - 1]) : parts[parts.length - 1];
@@ -431,15 +516,16 @@ class PricingOverlay implements Component {
 		const lines: string[] = [];
 
 		const mode = SORT_MODES[this.sortIdx];
-		const title = ` ${this.planLabel} · sort: ${mode.label} (Tab) `;
+		const viewTag = this.view.label ? ` · ${this.view.label}` : "";
+		const title = ` ${this.planLabel}${viewTag} · sort: ${mode.label} (Tab) `;
 		const titlePad = Math.max(0, innerW - visibleWidth(title));
 		lines.push(border("╭") + th.fg("accent", truncateToWidth(title, innerW)) + border("─".repeat(titlePad) + "╮"));
-		lines.push(row(dim(` ${this.table.url}`)));
+		lines.push(row(dim(` ${this.url}`)));
 		const cursor = this.searching ? "\x1b[7m \x1b[27m" : "";
 		const searchLine = this.query || this.searching ? th.fg("accent", `/ ${this.query}`) + cursor : dim(" / to search");
 		lines.push(row(` ${searchLine}`));
 		lines.push(row(""));
-		lines.push(row(format(this.table.headers[0], this.table.headers.slice(1))));
+		lines.push(row(format(this.view.headers[0], this.view.headers.slice(1))));
 		const ruler = format("x".repeat(nameW), widths.map((w) => "─".repeat(w)));
 		lines.push(row(dim("─".repeat(Math.max(1, visibleWidth(ruler))))));
 
@@ -457,8 +543,9 @@ class PricingOverlay implements Component {
 		}
 
 		const hint = total === 0 ? "no match" : this.scroll + rows >= total ? `end · ${total} shown` : `${this.scroll + 1}–${this.scroll + rows} of ${total}`;
+		const viewHint = this.views.length > 1 ? "h/l view · " : "";
 		lines.push(row(""));
-		lines.push(row(dim(` Tab sort · / search · ↑↓/jk · pgup/pgdn · g/G · Esc close · ${hint}`)));
+		lines.push(row(dim(` Tab sort · / search · ${viewHint}↑↓/jk · pgup/pgdn · g/G · Esc close · ${hint}`)));
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));
 		return lines;
 	}
@@ -478,12 +565,13 @@ async function openPricing(plan: Plan, ctx: ExtensionCommandContext): Promise<vo
 		ctx.ui.setStatus("cc-pricing", undefined);
 	}
 	if (ctx.mode !== "tui") {
-		for (const m of table.rows)
-			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
+		for (const view of table.views)
+			for (const m of view.rows)
+				console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
 		return;
 	}
-	// Width fits all columns (name up to 30 chars), capped to the terminal
-	const natural = layoutWidths(table.headers, table.rows, Number.MAX_SAFE_INTEGER).headerLen + 2;
+	// Width fits the widest view's columns (name up to 30 chars), capped to the terminal
+	const natural = Math.max(...table.views.map((v) => layoutWidths(v.headers, v.rows, Number.MAX_SAFE_INTEGER).headerLen)) + 2;
 	const width = Math.min(natural, Math.max(70, (process.stdout.columns ?? 110) - 2));
 	await ctx.ui.custom<void>(
 		(tui, theme, _kb, done) => new PricingOverlay(table, PLAN_TITLES[plan], tui, theme, done),
