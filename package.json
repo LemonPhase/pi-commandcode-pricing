@@ -1,0 +1,21 @@
+{
+	"name": "pi-commandcode-pricing",
+	"version": "0.1.0",
+	"description": "Command Code plan pricing in pi — /go-pricing, /goat-pricing, /pro-pricing, /max-pricing popups scraped live from commandcode.ai",
+	"license": "MIT",
+	"keywords": [
+		"pi-package"
+	],
+	"pi": {
+		"extensions": [
+			"./extensions"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"typescript": "^5.9.3"
+	}
+}
