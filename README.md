@@ -18,12 +18,12 @@ pi -e git:github.com/jack-zhang/pi-commandcode-pricing
 
 | Command | Shows |
 |---------|-------|
-| `/go-pricing` | Go plan overview — $1/mo, $10 credits |
+| `/go-pricing` | Go plan — 40 Go-eligible models with per-token prices (windows aren't published per-model on the Go page) |
 | `/goat-pricing` | GOAT plan — per-model pricing, intel, request limits (free models included) |
 | `/pro-pricing` | Pro plan — 46 models across three credit tables |
-| `/max-pricing` | Max 10× / Max 20× — both credit tiers side by side |
+| `/max-pricing` | Max 10× / Max 20× — both credit tiers side by side (they differ only in credit amounts) |
 
-Keys inside a popup: **Tab** cycles sort (Credits → Intelligence → Value intel/$), **`/`** filters by model name, `↑↓`/`jk` scroll, `PgUp/PgDn`/`u d` page, `g`/`G` top/end, `Esc` clears search then closes.
+Keys inside a popup: **Tab** cycles sort (Credits → Intelligence → Value intel/$), **`/`** filters by model name (Backspace on empty cancels), `↑↓`/`jk` scroll, `PgUp/PgDn`/`u d` page, `g`/`G` top/end, `Esc` clears search then closes.
 
 ## Where the data comes from
 
