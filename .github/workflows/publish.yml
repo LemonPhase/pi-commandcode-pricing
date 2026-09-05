@@ -1,0 +1,26 @@
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: tag matches package.json version
+        run: node -e "const v=require('./package.json').version; const t=process.env.GITHUB_REF_NAME.slice(1); if(v!==t){console.error(`tag v${t} != package.json ${v}`);process.exit(1)}"
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
