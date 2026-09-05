@@ -28,7 +28,7 @@ const consts = Object.entries(constPatterns).map(([k, re]) => {
 	if (!m) throw new Error(`const extraction failed: ${k}`);
 	return m;
 }).join("\n");
-const body = ["printable", "stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "formatIntelPerDollar", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
+const body = ["printable", "stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "formatIntelPerMo", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
 
 // pi-tui stubs, injected as parameters
 const ESC = "\x1b";
@@ -51,7 +51,7 @@ const decodeKittyPrintable = (data) => {
 
 const mod = new Function(
 	"visibleWidth", "truncateToWidth", "sliceByColumn", "GOAT_URL", "matchesKey", "decodeKittyPrintable",
-	`${consts}\n${body}\n${cls}\nreturn { parseFlight, parseCreditRows, parseRequestMap, buildGoTable, buildModelTable, sortRows, layoutWidths, creditText, PricingOverlay, PLAN_URLS };`,
+	`${consts}\n${body}\n${cls}\nreturn { parseFlight, parseCreditRows, parseRequestMap, parsePrice, blendedCost, formatIntelPerMo, buildGoTable, buildModelTable, sortRows, layoutWidths, creditText, PricingOverlay, PLAN_URLS };`,
 )(visibleWidth, truncateToWidth, sliceByColumn, GOAT_URL, matchesKey, decodeKittyPrintable);
 
 let failures = 0;
@@ -96,14 +96,23 @@ for (const plan of ["goat", "pro", "max"]) {
 	check(table.rows.length >= 20, `${table.rows.length} rows parsed`);
 	check(table.rows.every((r) => r.credits.length >= 1), "every row has a credits tier");
 	check(table.rows.every((r) => r.intel !== undefined), "intel column present");
-	check(table.rows.every((r) => r.intelPerDollar !== undefined), "intel/$ column present");
+	check(table.rows.every((r) => r.intelPerMo !== undefined), "intel/mo column present");
+	const scoredPaid = table.rows.filter((r) => r.intel !== "—" && r.blended !== 0);
+	check(scoredPaid.every((r) => {
+		const expected = r.credits.map((c) => {
+			const credit = mod.parsePrice(c.value) ?? 0;
+			return credit === 0 || r.intel === "—" || r.blended === 0 ? (r.blended === 0 && r.intel !== "—" ? "∞" : "—") : ((Number.parseFloat(r.intel) * credit) / r.blended).toFixed(0);
+		});
+		return r.intelPerMo === expected.join("/");
+	}), "intel/mo = intel × credits ÷ blended per tier");
+	check(table.rows.every((r) => (r.intel === "—" ? r.intelPerMo.split("/").every((t) => t === "—") : true)), "unscored rows have — intel/mo per tier");
 	const withReq = table.rows.filter((r) => r.req5h !== "—").length;
 	check(withReq >= table.rows.length * 0.8, `${withReq} rows joined with request limits`);
 
 	const natural = mod.layoutWidths(table.headers, table.rows).headerLen + 2;
 	check(mod.layoutWidths(table.headers, table.rows).headerLen <= natural - 2, `natural width ${natural} is self-consistent`);
 
-	for (const mode of ["credits", "intel", "value"]) permutationCheck(table.rows, mod.sortRows(table.rows, mode), `sort ${mode}`);
+	for (const mode of ["credits", "intel", "value", "plan"]) permutationCheck(table.rows, mod.sortRows(table.rows, mode), `sort ${mode}`);
 	interactionCheck(table, natural);
 }
 
@@ -114,8 +123,11 @@ const goatRows = goat.rows;
 check(goatRows.some((r) => r.model.endsWith("(Free)")), "free models merged with (Free) suffix");
 const sol = goatRows.find((r) => r.model === "GPT-5.6 Sol");
 check(!!sol && sol.intel !== "—", "intel joined from flight data");
-check(!!sol && sol.intelPerDollar === (Number.parseFloat(sol.intel) / sol.blended).toFixed(1), "intel/$ calculated correctly");
-check(goatRows.find((r) => r.blended === 0 && r.intel !== "—")?.intelPerDollar === "∞", "scored free models have ∞ intel/$");
+check(!!sol && sol.intelPerMo === (Number.parseFloat(sol.intel) * 70 / sol.blended).toFixed(0), "intel/mo = intel × credits ÷ blended (Sol)");
+check(goatRows.find((r) => r.blended === 0 && r.intel !== "—")?.intelPerMo === "∞", "scored free models have ∞ intel/mo");
+check(mod.sortRows(goatRows, "plan")[0].blended === 0, "plan sort puts free models on top");
+const planSorted = mod.sortRows(goatRows.filter((r) => r.blended !== 0 && r.intel !== "—"), "plan");
+check(planSorted.every((r, i) => i === 0 || Number.parseFloat(planSorted[i - 1].intelPerMo) >= Number.parseFloat(r.intelPerMo)), "plan sort descends by intel/mo");
 check(!!sol && sol.req5h === "414", "request limits joined");
 check(mod.sortRows(goatRows, "value")[0].blended === 0, "value sort puts free models on top");
 check(sol.blended.toFixed(2) === "11.25", "blended cost 0.75·in + 0.25·out (GPT-5.6 Sol → 11.25)");

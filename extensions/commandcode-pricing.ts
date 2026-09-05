@@ -23,7 +23,7 @@ const PLAN_TITLES: Record<Plan, string> = {
 	max: "Max plans — $100/$200/mo → $150/$300 credits",
 };
 
-const STANDARD_HEADERS = ["Model", "In/MTok", "Out/MTok", "Cache", "Intel", "Intel/$", "5h", "Week", "Month", "Credits"];
+const STANDARD_HEADERS = ["Model", "In/MTok", "Out/MTok", "Cache", "Intel", "Intel/mo", "5h", "Week", "Month", "Credits"];
 
 interface Row {
 	model: string;
@@ -31,12 +31,12 @@ interface Row {
 	output: string;
 	cacheRead: string;
 	intel: string; // "58.6" or "—"
-	intelPerDollar: string;
+	intelPerMo: string;
 	req5h: string;
 	reqWeek: string;
 	reqMonth: string;
 	credits: { label: string; value: string }[]; // one per tier; max carries two
-	blended: number; // 0.75·in + 0.25·out from this row's own prices, for the value sort
+	blended: number; // 0.75·in + 0.25·out from this row's own prices; feeds Intel/mo and the value sort
 }
 
 interface PlanTable {
@@ -226,11 +226,16 @@ async function buildPlanTable(plan: Plan, onError?: (msg: string) => void): Prom
 	return plan === "go" ? buildGoTable(intel) : buildModelTable(plan, pageHtml, intel);
 }
 
-function formatIntelPerDollar(intelStr: string, blended: number): string {
+// Intel/mo — the plan-holder's lens: intelligence × the plan's monthly credit allowance for
+// that model ÷ blended cost, i.e. scored intelligence×MTok the plan buys per month. Credits
+// differ per model, so this accounts for what Intel/$ can't see. "—" unscored/no allowance;
+// "∞" for free models (blended 0).
+function formatIntelPerMo(intelStr: string, blended: number, creditsValue: string): string {
 	if (intelStr === "—") return "—";
 	if (blended === 0) return "∞";
 	const score = Number.parseFloat(intelStr);
-	return Number.isFinite(score) && blended > 0 ? (score / blended).toFixed(1) : "—";
+	const credit = parsePrice(creditsValue);
+	return Number.isFinite(score) && credit != null ? ((score * credit) / blended).toFixed(0) : "—";
 }
 
 // go is a plans-overview page — no model tables on it. Show the Go-eligible models instead
@@ -250,7 +255,7 @@ function buildGoTable(intel: { models: FlightModel[] }): PlanTable {
 				output: outP,
 				cacheRead: formatPrice(m.cacheReadCost),
 				intel: intelStr,
-				intelPerDollar: formatIntelPerDollar(intelStr, blended),
+				intelPerMo: "—", // go publishes no per-model credit allowances
 				req5h: "—",
 				reqWeek: "—",
 				reqMonth: "—",
@@ -275,6 +280,7 @@ function buildModelTable(
 		const rq = req.get(cr.name.toLowerCase());
 		const intelStr = fm?.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—";
 		const blended = blendedCost(cr.input, cr.output);
+		const intelPerMo = cr.creditValues.map((c) => formatIntelPerMo(intelStr, blended, c.value)).join("/");
 		bases.push({
 			base: {
 				model: cr.name,
@@ -282,7 +288,7 @@ function buildModelTable(
 				output: cr.output,
 				cacheRead: cr.cacheRead,
 				intel: intelStr,
-				intelPerDollar: formatIntelPerDollar(intelStr, blended),
+				intelPerMo,
 				req5h: rq?.[0] ?? "—",
 				reqWeek: rq?.[1] ?? "—",
 				reqMonth: rq?.[2] ?? "—",
@@ -307,7 +313,7 @@ function buildModelTable(
 					output: formatPrice(fm.outputCost),
 					cacheRead: formatPrice(fm.cacheReadCost),
 					intel: intelStr,
-					intelPerDollar: formatIntelPerDollar(intelStr, 0),
+					intelPerMo: formatIntelPerMo(intelStr, 0, "Free"),
 					req5h: "—",
 					reqWeek: "—",
 					reqMonth: "—",
@@ -326,10 +332,11 @@ function buildModelTable(
 	};
 }
 
-const SORT_MODES: { key: "credits" | "intel" | "value"; label: string }[] = [
+const SORT_MODES: { key: "credits" | "intel" | "value" | "plan"; label: string }[] = [
 	{ key: "credits", label: "Credits" },
 	{ key: "intel", label: "Intelligence" },
 	{ key: "value", label: "Value (intel/$)" },
+	{ key: "plan", label: "Plan (intel/mo)" },
 ];
 
 function creditValue(credits: Row["credits"]): number {
@@ -343,6 +350,13 @@ function sortRows(rows: Row[], mode: (typeof SORT_MODES)[number]["key"]): Row[] 
 	} else if (mode === "intel") {
 		const score = (r: Row) => (r.intel === "—" ? -1 : Number.parseFloat(r.intel));
 		sorted.sort((a, b) => score(b) - score(a) || a.model.localeCompare(b.model));
+	} else if (mode === "plan") {
+		// Plan: free models on top (intel desc within), then by plan-adjusted intel/mo desc,
+		// unscored paid last. The answer to "what should I run on this plan".
+		const intel = (r: Row) => (r.intel === "—" ? -1 : Number.parseFloat(r.intel));
+		const tier = (r: Row): 0 | 1 | 2 => (r.blended === 0 ? 0 : intel(r) < 0 ? 2 : 1);
+		const rank = (r: Row) => (tier(r) === 0 ? intel(r) : tier(r) === 1 ? Number.parseFloat(r.intelPerMo) : 0);
+		sorted.sort((a, b) => tier(a) - tier(b) || rank(b) - rank(a) || a.model.localeCompare(b.model));
 	} else {
 		// Value: tiered — free models on top (intel desc within), then paid by intel per
 		// blended $/MTok, unscored paid last
@@ -359,7 +373,7 @@ const CHROME_LINES = 8; // top border, url, search, blank, header, divider, foot
 // Column widths: fixed natural model name column (24 chars) + section gaps + content widths.
 // 4 section dividers (" ┆ " = 12) + 1 leading space + 2 spaces in prices + 1 space in intel + 2 in limits = 18 formatting chars.
 function layoutWidths(headers: string[], rows: Row[]) {
-	const cells = (r: Row) => [r.input, r.output, r.cacheRead, r.intel, r.intelPerDollar, r.req5h, r.reqWeek, r.reqMonth, creditText(r)];
+	const cells = (r: Row) => [r.input, r.output, r.cacheRead, r.intel, r.intelPerMo, r.req5h, r.reqWeek, r.reqMonth, creditText(r)];
 	const widths = headers.slice(1).map((h, i) => Math.max(visibleWidth(h), ...rows.map((r) => visibleWidth(cells(r)[i] ?? ""))));
 	const nameW = 24;
 	const headerLen = nameW + 18 + widths.reduce((a, w) => a + w, 0);
@@ -537,13 +551,14 @@ class PricingOverlay implements Component {
 				return dim(s);
 			};
 
-			const colorIntelPerDollar = (s: string) => {
+			const colorIntelPerMo = (s: string) => {
 				if (s === "∞") return th.fg("success", s);
 				const n = Number.parseFloat(s);
 				if (!Number.isFinite(n)) return dim(s);
-				if (n >= 100) return th.fg("success", s);
-				if (n >= 40) return th.fg("accent", s);
-				if (n >= 15) return th.fg("text", s);
+				// thresholds eyeballed against goat/pro/max intel/mo ranges
+				if (n >= 800) return th.fg("success", s);
+				if (n >= 250) return th.fg("accent", s);
+				if (n >= 80) return th.fg("text", s);
 				return dim(s);
 			};
 
@@ -566,7 +581,7 @@ class PricingOverlay implements Component {
 
 			const intelCols: [string, string] = [
 				colorIntel(m.intel.padStart(widths[3])),
-				colorIntelPerDollar(m.intelPerDollar.padStart(widths[4])),
+				colorIntelPerMo(m.intelPerMo.padStart(widths[4])),
 			];
 
 			const limits: [string, string, string] = [
@@ -615,7 +630,7 @@ async function openPricing(plan: Plan, ctx: ExtensionCommandContext): Promise<vo
 	if (ctx.mode === "print") {
 		// print mode owns stdout; json/rpc modes stream a protocol there — notify instead
 		for (const m of table.rows)
-			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.intelPerDollar}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
+			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.intelPerMo}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
 		return;
 	}
 	// Width fits all columns, capped to the terminal
