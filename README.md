@@ -5,6 +5,8 @@
 ## Install
 
 ```bash
+pi install npm:pi-commandcode-pricing
+# or from GitHub:
 pi install git:github.com/LemonPhase/pi-commandcode-pricing
 ```
 
