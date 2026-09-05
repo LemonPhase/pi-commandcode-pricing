@@ -28,16 +28,18 @@ const consts = Object.entries(constPatterns).map(([k, re]) => {
 	if (!m) throw new Error(`const extraction failed: ${k}`);
 	return m;
 }).join("\n");
-const body = ["printable", "stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
+const body = ["printable", "stripTags", "modelName", "parsePrice", "formatPrice", "flightArrayAfter", "parseFlight", "parseCreditRows", "parseRequestMap", "blendedCost", "formatIntelPerDollar", "buildGoTable", "buildModelTable", "creditValue", "sortRows", "layoutWidths", "creditText"].map(grab).join("\n");
 
 // pi-tui stubs, injected as parameters
 const ESC = "\x1b";
 const KEYS = {
 	escape: ESC, return: "\r", tab: "\t", "ctrl+c": "\x03", backspace: "\x7f",
-	up: `${ESC}[A`, down: `${ESC}[B`, pageUp: `${ESC}[5~`, pageDown: `${ESC}[6~`, home: `${ESC}[H`, end: `${ESC}[F`,
+	up: `${ESC}[A`, down: `${ESC}[B`, left: `${ESC}[D`, right: `${ESC}[C`,
+	pageUp: `${ESC}[5~`, pageDown: `${ESC}[6~`, home: `${ESC}[H`, end: `${ESC}[F`,
 };
 const visibleWidth = (s) => s.replace(/\x1b\[[0-9;]*[mM]/g, "").replace(/\x1b\[7m/g, "").replace(/\x1b\[27m/g, "").length;
 const truncateToWidth = (s, n) => (visibleWidth(s) > n ? s.slice(0, n - 1) + "…" : s);
+const sliceByColumn = (s, start, length) => s.slice(start, start + length);
 const GOAT_URL = "https://commandcode.ai/docs/plans/goat";
 const matchesKey = (data, key) => data === KEYS[key];
 const decodeKittyPrintable = (data) => {
@@ -48,9 +50,9 @@ const decodeKittyPrintable = (data) => {
 };
 
 const mod = new Function(
-	"visibleWidth", "truncateToWidth", "GOAT_URL", "matchesKey", "decodeKittyPrintable",
+	"visibleWidth", "truncateToWidth", "sliceByColumn", "GOAT_URL", "matchesKey", "decodeKittyPrintable",
 	`${consts}\n${body}\n${cls}\nreturn { parseFlight, parseCreditRows, parseRequestMap, buildGoTable, buildModelTable, sortRows, layoutWidths, creditText, PricingOverlay, PLAN_URLS };`,
-)(visibleWidth, truncateToWidth, GOAT_URL, matchesKey, decodeKittyPrintable);
+)(visibleWidth, truncateToWidth, sliceByColumn, GOAT_URL, matchesKey, decodeKittyPrintable);
 
 let failures = 0;
 const check = (cond, msg) => {
@@ -78,6 +80,13 @@ const interactionCheck = (table, natural) => {
 	for (let i = 0; i < 4; i++) ov.handleInput("\x7f");
 	const rawAfter = ov.render(natural).join("\n");
 	check(!rawAfter.includes("\x1b[7m") && rawAfter.replace(/\x1b\[[0-9;]*[mM]/g, "").split("\n").some((l) => l.includes("/ to search")), "backspace-on-empty cancels search");
+
+	// Horizontal panning check when width is narrow
+	const narrowOut = ov.render(60).map(strip);
+	check(narrowOut.some((l) => l.includes("←→/hl pan")), "pan hint appears when narrow");
+	ov.handleInput("l");
+	const pannedOut = ov.render(60).map(strip);
+	check(pannedOut.length === narrowOut.length, "render works cleanly while panned");
 };
 
 // ---- model plans ----
@@ -87,11 +96,12 @@ for (const plan of ["goat", "pro", "max"]) {
 	check(table.rows.length >= 20, `${table.rows.length} rows parsed`);
 	check(table.rows.every((r) => r.credits.length >= 1), "every row has a credits tier");
 	check(table.rows.every((r) => r.intel !== undefined), "intel column present");
+	check(table.rows.every((r) => r.intelPerDollar !== undefined), "intel/$ column present");
 	const withReq = table.rows.filter((r) => r.req5h !== "—").length;
 	check(withReq >= table.rows.length * 0.8, `${withReq} rows joined with request limits`);
 
-	const natural = mod.layoutWidths(table.headers, table.rows, Number.MAX_SAFE_INTEGER).headerLen + 2;
-	check(mod.layoutWidths(table.headers, table.rows, natural - 2).headerLen <= natural - 2, `natural width ${natural} is self-consistent`);
+	const natural = mod.layoutWidths(table.headers, table.rows).headerLen + 2;
+	check(mod.layoutWidths(table.headers, table.rows).headerLen <= natural - 2, `natural width ${natural} is self-consistent`);
 
 	for (const mode of ["credits", "intel", "value"]) permutationCheck(table.rows, mod.sortRows(table.rows, mode), `sort ${mode}`);
 	interactionCheck(table, natural);
@@ -104,6 +114,8 @@ const goatRows = goat.rows;
 check(goatRows.some((r) => r.model.endsWith("(Free)")), "free models merged with (Free) suffix");
 const sol = goatRows.find((r) => r.model === "GPT-5.6 Sol");
 check(!!sol && sol.intel !== "—", "intel joined from flight data");
+check(!!sol && sol.intelPerDollar === (Number.parseFloat(sol.intel) / sol.blended).toFixed(1), "intel/$ calculated correctly");
+check(goatRows.find((r) => r.blended === 0 && r.intel !== "—")?.intelPerDollar === "∞", "scored free models have ∞ intel/$");
 check(!!sol && sol.req5h === "414", "request limits joined");
 check(mod.sortRows(goatRows, "value")[0].blended === 0, "value sort puts free models on top");
 check(sol.blended.toFixed(2) === "11.25", "blended cost 0.75·in + 0.25·out (GPT-5.6 Sol → 11.25)");

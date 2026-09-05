@@ -5,7 +5,7 @@
 // plan's own tables. Max's two tiers differ only in credit amounts, so both tiers share a row.
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const PLAN_URLS = {
 	go: "https://commandcode.ai/docs/plans/go",
@@ -23,7 +23,7 @@ const PLAN_TITLES: Record<Plan, string> = {
 	max: "Max plans — $100/$200/mo → $150/$300 credits",
 };
 
-const STANDARD_HEADERS = ["Model", "In/MTok", "Out/MTok", "Cache", "Intel", "5h", "Week", "Month", "Credits"];
+const STANDARD_HEADERS = ["Model", "In/MTok", "Out/MTok", "Cache", "Intel", "Intel/$", "5h", "Week", "Month", "Credits"];
 
 interface Row {
 	model: string;
@@ -31,6 +31,7 @@ interface Row {
 	output: string;
 	cacheRead: string;
 	intel: string; // "58.6" or "—"
+	intelPerDollar: string;
 	req5h: string;
 	reqWeek: string;
 	reqMonth: string;
@@ -225,24 +226,38 @@ async function buildPlanTable(plan: Plan, onError?: (msg: string) => void): Prom
 	return plan === "go" ? buildGoTable(intel) : buildModelTable(plan, pageHtml, intel);
 }
 
+function formatIntelPerDollar(intelStr: string, blended: number): string {
+	if (intelStr === "—") return "—";
+	if (blended === 0) return "∞";
+	const score = Number.parseFloat(intelStr);
+	return Number.isFinite(score) && blended > 0 ? (score / blended).toFixed(1) : "—";
+}
+
 // go is a plans-overview page — no model tables on it. Show the Go-eligible models instead
 // (minPlanName "Go" in the catalogue flight data). The go page publishes no per-model credit
 // allowances or request windows, so those columns stay "—".
 function buildGoTable(intel: { models: FlightModel[] }): PlanTable {
 	const rows: Row[] = intel.models
 		.filter((m) => m.minPlanName === "Go")
-		.map((m) => ({
-			model: m.name,
-			input: formatPrice(m.inputCost),
-			output: formatPrice(m.outputCost),
-			cacheRead: formatPrice(m.cacheReadCost),
-			intel: m.intelligenceIndex != null ? m.intelligenceIndex.toFixed(1) : "—",
-			req5h: "—",
-			reqWeek: "—",
-			reqMonth: "—",
-			credits: [{ label: "Credits", value: "—" }],
-			blended: blendedCost(formatPrice(m.inputCost), formatPrice(m.outputCost)),
-		}));
+		.map((m) => {
+			const inP = formatPrice(m.inputCost);
+			const outP = formatPrice(m.outputCost);
+			const blended = blendedCost(inP, outP);
+			const intelStr = m.intelligenceIndex != null ? m.intelligenceIndex.toFixed(1) : "—";
+			return {
+				model: m.name,
+				input: inP,
+				output: outP,
+				cacheRead: formatPrice(m.cacheReadCost),
+				intel: intelStr,
+				intelPerDollar: formatIntelPerDollar(intelStr, blended),
+				req5h: "—",
+				reqWeek: "—",
+				reqMonth: "—",
+				credits: [{ label: "Credits", value: "—" }],
+				blended,
+			};
+		});
 	if (rows.length === 0) throw new Error("No Go-eligible models found — catalogue data may have changed");
 	return { headers: STANDARD_HEADERS, rows, url: PLAN_URLS.go };
 }
@@ -258,17 +273,20 @@ function buildModelTable(
 	for (const cr of parseCreditRows(html)) {
 		const fm = intel.byName.get(cr.name.toLowerCase());
 		const rq = req.get(cr.name.toLowerCase());
+		const intelStr = fm?.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—";
+		const blended = blendedCost(cr.input, cr.output);
 		bases.push({
 			base: {
 				model: cr.name,
 				input: cr.input,
 				output: cr.output,
 				cacheRead: cr.cacheRead,
-				intel: fm?.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
+				intel: intelStr,
+				intelPerDollar: formatIntelPerDollar(intelStr, blended),
 				req5h: rq?.[0] ?? "—",
 				reqWeek: rq?.[1] ?? "—",
 				reqMonth: rq?.[2] ?? "—",
-				blended: blendedCost(cr.input, cr.output),
+				blended,
 			},
 			credits: cr.creditValues,
 		});
@@ -281,13 +299,15 @@ function buildModelTable(
 		for (const fm of intel.models) {
 			if (!fm.deal?.free || !intel.goatIds.has(fm.id) || usedIds.has(fm.id)) continue;
 			usedIds.add(fm.id);
+			const intelStr = fm.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—";
 			bases.push({
 				base: {
 					model: `${fm.name} (Free)`,
 					input: formatPrice(fm.inputCost),
 					output: formatPrice(fm.outputCost),
 					cacheRead: formatPrice(fm.cacheReadCost),
-					intel: fm.intelligenceIndex != null ? fm.intelligenceIndex.toFixed(1) : "—",
+					intel: intelStr,
+					intelPerDollar: formatIntelPerDollar(intelStr, 0),
 					req5h: "—",
 					reqWeek: "—",
 					reqMonth: "—",
@@ -336,15 +356,14 @@ function sortRows(rows: Row[], mode: (typeof SORT_MODES)[number]["key"]): Row[] 
 
 const CHROME_LINES = 8; // top border, url, search, blank, header, divider, footer, bottom border
 
-// Column widths from data so the 9 columns can't overflow; the name column absorbs the remainder.
-// ponytail: below ~95 terminal cols the name column bottoms out at 12 and right columns clip —
-// compact headers would be the upgrade if that ever matters.
-function layoutWidths(headers: string[], rows: Row[], innerW: number) {
-	const cells = (r: Row) => [r.input, r.output, r.cacheRead, r.intel, r.req5h, r.reqWeek, r.reqMonth, creditText(r)];
+// Column widths: fixed natural model name column (24 chars) + section gaps + content widths.
+// 4 section dividers (" ┆ " = 12) + 1 leading space + 2 spaces in prices + 1 space in intel + 2 in limits = 18 formatting chars.
+function layoutWidths(headers: string[], rows: Row[]) {
+	const cells = (r: Row) => [r.input, r.output, r.cacheRead, r.intel, r.intelPerDollar, r.req5h, r.reqWeek, r.reqMonth, creditText(r)];
 	const widths = headers.slice(1).map((h, i) => Math.max(visibleWidth(h), ...rows.map((r) => visibleWidth(cells(r)[i] ?? ""))));
-	const fixed = widths.reduce((a, w) => a + w + 2, 0);
-	const nameW = Math.max(12, Math.min(30, innerW - fixed));
-	return { widths, nameW, headerLen: fixed + nameW };
+	const nameW = 24;
+	const headerLen = nameW + 18 + widths.reduce((a, w) => a + w, 0);
+	return { widths, nameW, headerLen };
 }
 
 function creditText(r: Row): string {
@@ -357,6 +376,8 @@ class PricingOverlay implements Component {
 	private tui: TUI;
 	private theme: Theme;
 	private scroll = 0;
+	private hScroll = 0;
+	private maxHScroll = 0;
 	private sortIdx = 0;
 	private query = "";
 	private searching = false;
@@ -409,6 +430,10 @@ class PricingOverlay implements Component {
 			this.scroll--;
 		} else if (matchesKey(data, "down") || printable(data) === "j") {
 			this.scroll++;
+		} else if (matchesKey(data, "left") || printable(data) === "h") {
+			this.hScroll = Math.max(0, this.hScroll - 6);
+		} else if (matchesKey(data, "right") || printable(data) === "l") {
+			this.hScroll = Math.min(this.maxHScroll, this.hScroll + 6);
 		} else if (matchesKey(data, "pageUp") || printable(data) === "u") {
 			this.scroll -= page;
 		} else if (matchesKey(data, "pageDown") || printable(data) === "d") {
@@ -451,12 +476,25 @@ class PricingOverlay implements Component {
 		this.clampScroll();
 		const vis = sorted.slice(this.scroll, this.scroll + rows);
 
-		const { widths, nameW } = layoutWidths(this.table.headers, sorted, innerW);
-		const format = (model: string, rest: string[], colorLast?: (s: string) => string) => {
-			const parts = rest.map((c, i) => c.padStart(widths[i]));
-			const last = colorLast && parts.length > 0 ? colorLast(parts[parts.length - 1]) : parts[parts.length - 1];
-			return `${model.padEnd(nameW).slice(0, nameW)}  ${parts.slice(0, -1).join("  ")}  ${last}`;
+		const { widths, nameW, headerLen } = layoutWidths(this.table.headers, sorted);
+		this.maxHScroll = Math.max(0, headerLen - innerW);
+		this.hScroll = Math.max(0, Math.min(this.hScroll, this.maxHScroll));
+
+		const tableRow = (s: string) => {
+			const sliced = this.maxHScroll > 0 ? sliceByColumn(s, this.hScroll, innerW) : s;
+			const pad = Math.max(0, innerW - visibleWidth(sliced));
+			return border("│") + sliced + (pad > 0 ? " ".repeat(pad) : "") + border("│");
 		};
+
+		const sep = dim(" ┆ ");
+		const formatSectioned = (
+			model: string,
+			prices: [string, string, string],
+			intelCols: [string, string],
+			limits: [string, string, string],
+			credits: string,
+		) => `${model} ${sep}${prices.join(" ")}${sep}${intelCols.join(" ")}${sep}${limits.join(" ")}${sep}${credits}`;
+
 		const lines: string[] = [];
 
 		const mode = SORT_MODES[this.sortIdx];
@@ -468,26 +506,94 @@ class PricingOverlay implements Component {
 		const searchLine = this.query || this.searching ? th.fg("accent", `/ ${this.query}`) + cursor : dim(" / to search");
 		lines.push(row(` ${searchLine}`));
 		lines.push(row(""));
-		lines.push(row(format(this.table.headers[0], this.table.headers.slice(1))));
-		const ruler = format("x".repeat(nameW), widths.map((w) => "─".repeat(w)));
-		lines.push(row(dim("─".repeat(Math.max(1, visibleWidth(ruler))))));
+
+		// Header row with dimmed section borders
+		const hdrCols = this.table.headers.slice(1).map((h, i) => h.padStart(widths[i]));
+		const headerLine = formatSectioned(
+			this.table.headers[0].padEnd(nameW).slice(0, nameW),
+			[hdrCols[0], hdrCols[1], hdrCols[2]],
+			[hdrCols[3], hdrCols[4]],
+			[hdrCols[5], hdrCols[6], hdrCols[7]],
+			hdrCols[8],
+		);
+		lines.push(tableRow(headerLine));
+
+		const rulerPrices: [string, string, string] = ["─".repeat(widths[0]), "─".repeat(widths[1]), "─".repeat(widths[2])];
+		const rulerIntel: [string, string] = ["─".repeat(widths[3]), "─".repeat(widths[4])];
+		const rulerLimits: [string, string, string] = ["─".repeat(widths[5]), "─".repeat(widths[6]), "─".repeat(widths[7])];
+		const rulerCredits = "─".repeat(widths[8]);
+		const ruler = formatSectioned("─".repeat(nameW), rulerPrices, rulerIntel, rulerLimits, rulerCredits);
+		lines.push(tableRow(dim(ruler)));
 
 		for (const m of vis) {
 			const isFree = m.credits.some((c) => c.value === "Free");
+
+			// Color helpers
+			const colorIntel = (s: string) => {
+				const n = Number.parseFloat(s);
+				if (!Number.isFinite(n)) return dim(s);
+				if (n >= 55) return th.fg("accent", s);
+				if (n >= 45) return th.fg("text", s);
+				return dim(s);
+			};
+
+			const colorIntelPerDollar = (s: string) => {
+				if (s === "∞") return th.fg("success", s);
+				const n = Number.parseFloat(s);
+				if (!Number.isFinite(n)) return dim(s);
+				if (n >= 100) return th.fg("success", s);
+				if (n >= 40) return th.fg("accent", s);
+				if (n >= 15) return th.fg("text", s);
+				return dim(s);
+			};
+
+			const colorCredit = (s: string) => {
+				if (isFree) return th.fg("success", s);
+				if (s.includes("$")) return th.fg("warning", s);
+				return dim(s);
+			};
+
+			const colorLimit = (s: string) => (s === "—" ? dim(s) : s);
+
+			const p0 = m.input.padStart(widths[0]);
+			const p1 = m.output.padStart(widths[1]);
+			const p2 = m.cacheRead.padStart(widths[2]);
+			const prices: [string, string, string] = [
+				isFree || m.input === "$0.00" ? th.fg("success", p0) : p0,
+				isFree || m.output === "$0.00" ? th.fg("success", p1) : p1,
+				isFree || m.cacheRead === "$0.00" ? th.fg("success", p2) : dim(p2),
+			];
+
+			const intelCols: [string, string] = [
+				colorIntel(m.intel.padStart(widths[3])),
+				colorIntelPerDollar(m.intelPerDollar.padStart(widths[4])),
+			];
+
+			const limits: [string, string, string] = [
+				colorLimit(m.req5h.padStart(widths[5])),
+				colorLimit(m.reqWeek.padStart(widths[6])),
+				colorLimit(m.reqMonth.padStart(widths[7])),
+			];
+
+			const mName = isFree ? th.fg("success", m.model.padEnd(nameW).slice(0, nameW)) : m.model.padEnd(nameW).slice(0, nameW);
+
 			lines.push(
-				row(
-					format(
-						m.model,
-						[m.input, m.output, m.cacheRead, m.intel, m.req5h, m.reqWeek, m.reqMonth, creditText(m)],
-						isFree ? (s) => th.fg("success", s) : undefined,
+				tableRow(
+					formatSectioned(
+						mName,
+						prices,
+						intelCols,
+						limits,
+						colorCredit(creditText(m).padStart(widths[8])),
 					),
 				),
 			);
 		}
 
+		const hHint = this.maxHScroll > 0 ? " · ←→/hl pan" : "";
 		const hint = total === 0 ? "no match" : this.scroll + rows >= total ? `end · ${total} shown` : `${this.scroll + 1}–${this.scroll + rows} of ${total}`;
 		lines.push(row(""));
-		lines.push(row(dim(` Tab sort · / search · ↑↓/jk · pgup/pgdn · g/G · Esc close · ${hint}`)));
+		lines.push(row(dim(` Tab sort · / search · ↑↓/jk${hHint} · pgup/pgdn · g/G · Esc close · ${hint}`)));
 		lines.push(border(`╰${"─".repeat(innerW)}╯`));
 		return lines;
 	}
@@ -509,11 +615,11 @@ async function openPricing(plan: Plan, ctx: ExtensionCommandContext): Promise<vo
 	if (ctx.mode === "print") {
 		// print mode owns stdout; json/rpc modes stream a protocol there — notify instead
 		for (const m of table.rows)
-			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
+			console.log(`${m.model}\t${m.input}\t${m.output}\t${m.cacheRead}\t${m.intel}\t${m.intelPerDollar}\t${m.req5h}\t${m.reqWeek}\t${m.reqMonth}\t${creditText(m)}`);
 		return;
 	}
-	// Width fits all columns (name up to 30 chars), capped to the terminal
-	const natural = layoutWidths(table.headers, table.rows, Number.MAX_SAFE_INTEGER).headerLen + 2;
+	// Width fits all columns, capped to the terminal
+	const natural = layoutWidths(table.headers, table.rows).headerLen + 2;
 	const width = Math.min(natural, Math.max(70, (process.stdout.columns ?? 110) - 2));
 	await ctx.ui.custom<void>(
 		(tui, theme, _kb, done) => new PricingOverlay(table, PLAN_TITLES[plan], tui, theme, done),
