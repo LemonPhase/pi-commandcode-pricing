@@ -25,7 +25,7 @@ pi -e git:github.com/LemonPhase/pi-commandcode-pricing
 | `/pro-pricing` | Pro plan — 46 models across three credit tables |
 | `/max-pricing` | Max 10× / Max 20× — both credit tiers side by side (they differ only in credit amounts) |
 
-Keys inside a popup: **Tab** cycles sort (Credits → Intelligence → Value intel/$ → Plan intel/mo), **`/`** filters by model name (Backspace on empty cancels), `↑↓`/`jk` scroll, `←→`/`hl` pan columns when overflowing, `PgUp/PgDn`/`u d` page, `g`/`G` top/end, `Esc` clears search then closes.
+Keys inside a popup: **Tab** cycles sort (Credits → Intelligence → Plan intel/mo), **`/`** filters by model name (Backspace on empty cancels), `↑↓`/`jk` scroll, `←→`/`hl` pan columns when overflowing, `PgUp/PgDn`/`u d` page, `g`/`G` top/end, `Esc` clears search then closes.
 
 ## Where the data comes from
 

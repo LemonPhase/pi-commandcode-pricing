@@ -36,7 +36,7 @@ interface Row {
 	reqWeek: string;
 	reqMonth: string;
 	credits: { label: string; value: string }[]; // one per tier; max carries two
-	blended: number; // 0.75·in + 0.25·out from this row's own prices; feeds Intel/mo and the value sort
+	blended: number; // 0.75·in + 0.25·out from this row's own prices; feeds Intel/mo and the plan sort
 }
 
 interface PlanTable {
@@ -332,10 +332,9 @@ function buildModelTable(
 	};
 }
 
-const SORT_MODES: { key: "credits" | "intel" | "value" | "plan"; label: string }[] = [
+const SORT_MODES: { key: "credits" | "intel" | "plan"; label: string }[] = [
 	{ key: "credits", label: "Credits" },
 	{ key: "intel", label: "Intelligence" },
-	{ key: "value", label: "Value (intel/$)" },
 	{ key: "plan", label: "Plan (intel/mo)" },
 ];
 
@@ -356,13 +355,6 @@ function sortRows(rows: Row[], mode: (typeof SORT_MODES)[number]["key"]): Row[] 
 		const intel = (r: Row) => (r.intel === "—" ? -1 : Number.parseFloat(r.intel));
 		const tier = (r: Row): 0 | 1 | 2 => (r.blended === 0 ? 0 : intel(r) < 0 ? 2 : 1);
 		const rank = (r: Row) => (tier(r) === 0 ? intel(r) : tier(r) === 1 ? Number.parseFloat(r.intelPerMo) : 0);
-		sorted.sort((a, b) => tier(a) - tier(b) || rank(b) - rank(a) || a.model.localeCompare(b.model));
-	} else {
-		// Value: tiered — free models on top (intel desc within), then paid by intel per
-		// blended $/MTok, unscored paid last
-		const intel = (r: Row) => (r.intel === "—" ? -1 : Number.parseFloat(r.intel));
-		const tier = (r: Row): 0 | 1 | 2 => (r.blended === 0 ? 0 : intel(r) < 0 ? 2 : 1);
-		const rank = (r: Row) => (tier(r) === 0 ? intel(r) : tier(r) === 1 ? intel(r) / r.blended : 0);
 		sorted.sort((a, b) => tier(a) - tier(b) || rank(b) - rank(a) || a.model.localeCompare(b.model));
 	}
 	return sorted;

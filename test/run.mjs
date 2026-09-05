@@ -112,7 +112,7 @@ for (const plan of ["goat", "pro", "max"]) {
 	const natural = mod.layoutWidths(table.headers, table.rows).headerLen + 2;
 	check(mod.layoutWidths(table.headers, table.rows).headerLen <= natural - 2, `natural width ${natural} is self-consistent`);
 
-	for (const mode of ["credits", "intel", "value", "plan"]) permutationCheck(table.rows, mod.sortRows(table.rows, mode), `sort ${mode}`);
+	for (const mode of ["credits", "intel", "plan"]) permutationCheck(table.rows, mod.sortRows(table.rows, mode), `sort ${mode}`);
 	interactionCheck(table, natural);
 }
 
@@ -129,7 +129,7 @@ check(mod.sortRows(goatRows, "plan")[0].blended === 0, "plan sort puts free mode
 const planSorted = mod.sortRows(goatRows.filter((r) => r.blended !== 0 && r.intel !== "—"), "plan");
 check(planSorted.every((r, i) => i === 0 || Number.parseFloat(planSorted[i - 1].intelPerMo) >= Number.parseFloat(r.intelPerMo)), "plan sort descends by intel/mo");
 check(!!sol && sol.req5h === "414", "request limits joined");
-check(mod.sortRows(goatRows, "value")[0].blended === 0, "value sort puts free models on top");
+check(mod.sortRows(goatRows, "plan")[0].blended === 0, "plan sort puts free models on top");
 check(sol.blended.toFixed(2) === "11.25", "blended cost 0.75·in + 0.25·out (GPT-5.6 Sol → 11.25)");
 
 // ---- max specifics ----
