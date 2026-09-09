@@ -2,6 +2,8 @@
 
 [Command Code](https://commandcode.ai) plan pricing inside [pi](https://pi.dev) — scrollable popup with sort, search, and request limits, scraped live from the official docs pages (no public pricing API exists).
 
+![GOAT plan pricing popup in pi](docs/assets/goat-pricing.png)
+
 ## Install
 
 ```bash
